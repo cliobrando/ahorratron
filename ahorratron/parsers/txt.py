@@ -1,0 +1,70 @@
+from copy import deepcopy
+from typing import Any, Dict, List
+
+import pandas as pd
+
+
+def get_expected_length(field_definitions: Dict[str, Any]) -> int:
+    """Calculate the expected length of a fixed-width record based on field definitions."""
+    return sum(field["length"] for field in field_definitions.values())
+
+
+def fit_to_grow_definitions(
+    field_definitions: Dict[str, Any], new_line_length: int
+) -> Dict[str, Any]:
+    expected = get_expected_length(field_definitions)
+    diff = new_line_length - expected
+    ans = deepcopy(field_definitions)
+    found = False
+    for field, field_def in field_definitions.items():
+        if field_def.get("grow_to_fit", False):
+            ans[field]["length"] += diff
+            found = True
+            continue
+        if found:
+            ans[field]["start"] += diff
+    return ans
+
+
+def read_fixed_width_file(
+    lines: List[str], field_definitions: Dict[str, Any]
+) -> pd.DataFrame:
+    records = []
+    expected_length = get_expected_length(field_definitions)
+    for line in lines:
+        if not line.strip():
+            continue
+        if len(line) > expected_length:
+            new_field_definitions = fit_to_grow_definitions(
+                field_definitions, len(line)
+            )
+        else:
+            new_field_definitions = field_definitions
+        record = {}
+        for field_name, field_def in new_field_definitions.items():
+            start_idx = field_def["start"] - 1
+            end_idx = start_idx + field_def["length"]
+            if start_idx < len(line) and end_idx <= len(line):
+                raw_value = line[start_idx:end_idx].strip()
+            else:
+                raw_value = ""
+            if field_def["type"] == "date" and raw_value:
+                try:
+                    value = pd.to_datetime(raw_value, format=field_def["format"])
+                except Exception:
+                    value = raw_value
+            elif field_def["type"] == "decimal" and raw_value:
+                try:
+                    value = float(raw_value.strip())
+                except Exception:
+                    value = 0.0
+            else:
+                value = raw_value
+            record[field_name] = value
+        records.append(record)
+    df = pd.DataFrame(records)
+    if "sign" in df.columns and "amount" in df.columns:
+        df["amount"] = df.apply(
+            lambda row: -row["amount"] if row["sign"] == "-" else row["amount"], axis=1
+        )
+    return df
