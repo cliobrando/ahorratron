@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Temporary files
+tmp
+
+# Dotenv files
+.env
