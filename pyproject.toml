@@ -11,9 +11,11 @@ dependencies = [
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "actualpy>=0.0.1",
+    "selenium>=4.34.2"
 ]
 
 [project.scripts]
+bank-statement = "ahorratron.cli.bank_statement:main"
 convert-to-actual = "ahorratron.cli.convert_to_actual:main"
 ahorratron-api = "ahorratron.api.main:run_server"
 
