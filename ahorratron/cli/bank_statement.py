@@ -26,7 +26,7 @@ def wait_for_txt_file(
     download_dir: str, timeout: float = 10, poll_interval: float = 0.5
 ) -> str:
     """Wait for the first .txt file to appear in the directory and return its path."""
-    waited = 0
+    waited = 0.0
     while waited < timeout:
         txt_files = glob.glob(os.path.join(download_dir, "*.txt"))
         if txt_files:
@@ -111,7 +111,7 @@ def download_cartola_txt() -> str:
         random_wait()
         descargar_txt_btn.click()
         filepath = wait_for_txt_file(download_dir)
-        with open(filepath, "r") as f:
+        with open(filepath, encoding="utf8") as f:
             return f.read()
     finally:
         driver.quit()
@@ -134,7 +134,7 @@ def main():
     if args.output == "-":
         print(content)
     else:
-        with open(args.output, "w") as f:
+        with open(args.output, "w", encoding="utf8") as f:
             f.write(content)
 
 

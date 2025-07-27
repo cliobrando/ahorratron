@@ -24,6 +24,9 @@ dev = [
     "pytest>=8.4.1",
     "httpx>=0.25.0",
     "pre-commit>=4.2.0",
+    "mypy>=1.17.0",
+    "pandas-stubs>=2.3.0.250703",
+    "pylint>=3.3.7",
 ]
 
 [tool.setuptools]
@@ -32,12 +35,35 @@ packages = ["ahorratron"]
 [tool.uv]
 package = true
 
-[tool.ruff.lint]
-# Ignore E731 (lambda assignment)
-ignore = ["E731"]
+[tool.ruff]
+fix = true
 
+[tool.ruff.lint]
+select = [
+    "UP", # modernize python
+]
+ignore = [
+    "E731" # lambda assignment
+]
 
 #[tool.pyright]
 #venvPath = "."
 #venv = ".venv"
 #typeCheckingMode = "standard"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = ["actual", "actual.queries"]
+ignore_missing_imports = true
+
+[tool.pylint.'MAIN']
+fail-under = 8.0
+disable = [
+    "C3001", # allow lambda expression
+    "C0114", # missing-module-docstring
+    "C0115", # missing-class-docstring
+    "C0116", # missing-function-docstring
+]

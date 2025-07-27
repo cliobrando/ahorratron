@@ -1,17 +1,17 @@
 from copy import deepcopy
-from typing import Any, Dict, List
+from typing import Any
 
 import pandas as pd
 
 
-def get_expected_length(field_definitions: Dict[str, Any]) -> int:
+def get_expected_length(field_definitions: dict[str, Any]) -> int:
     """Calculate the expected length of a fixed-width record based on field definitions."""
     return sum(field["length"] for field in field_definitions.values())
 
 
 def fit_to_grow_definitions(
-    field_definitions: Dict[str, Any], new_line_length: int
-) -> Dict[str, Any]:
+    field_definitions: dict[str, Any], new_line_length: int
+) -> dict[str, Any]:
     expected = get_expected_length(field_definitions)
     diff = new_line_length - expected
     ans = deepcopy(field_definitions)
@@ -27,19 +27,18 @@ def fit_to_grow_definitions(
 
 
 def read_fixed_width_file(
-    lines: List[str], field_definitions: Dict[str, Any]
+    lines: list[str], field_definitions: dict[str, Any]
 ) -> pd.DataFrame:
     records = []
     expected_length = get_expected_length(field_definitions)
     for line in lines:
         if not line.strip():
             continue
+        new_field_definitions = field_definitions
         if len(line) > expected_length:
             new_field_definitions = fit_to_grow_definitions(
                 field_definitions, len(line)
             )
-        else:
-            new_field_definitions = field_definitions
         record = {}
         for field_name, field_def in new_field_definitions.items():
             start_idx = field_def["start"] - 1
@@ -51,15 +50,15 @@ def read_fixed_width_file(
             if field_def["type"] == "date" and raw_value:
                 try:
                     value = pd.to_datetime(raw_value, format=field_def["format"])
-                except Exception:
-                    value = raw_value
+                except (ValueError, TypeError):
+                    value = raw_value  # type: ignore
             elif field_def["type"] == "decimal" and raw_value:
                 try:
-                    value = float(raw_value.strip())
-                except Exception:
-                    value = 0.0
+                    value = float(raw_value.strip())  # type: ignore
+                except ValueError:
+                    value = 0.0  # type: ignore
             else:
-                value = raw_value
+                value = raw_value  # type: ignore
             record[field_name] = value
         records.append(record)
     df = pd.DataFrame(records)

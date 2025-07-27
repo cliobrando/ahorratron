@@ -2,6 +2,7 @@
 
 import logging
 
+import uvicorn
 from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 
@@ -23,7 +24,10 @@ app = FastAPI(
 async def log_request_middleware(request, call_next):
     body = await request.body()
     logger.info(
-        f"Incoming request: {request.method} {request.url.path} | Body: {body.decode('utf-8') if body else None}"
+        "Incoming request: %s %s | Body: %s",
+        request.method,
+        request.url.path,
+        body.decode("utf-8") if body else None,
     )
     response = await call_next(request)
     return response
@@ -33,9 +37,9 @@ app.include_router(router)
 
 
 @app.exception_handler(Exception)
-async def general_exception_handler(request, exc: Exception):
+async def general_exception_handler(_request, exc: Exception):
     """Handle general exceptions."""
-    logger.error(f"Unexpected error: {str(exc)}")
+    logger.error("Unexpected error: %s", str(exc))
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=ErrorResponse(
@@ -52,7 +56,6 @@ async def general_exception_handler(request, exc: Exception):
 
 def run_server():
     """Run the API server using uvicorn."""
-    import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
