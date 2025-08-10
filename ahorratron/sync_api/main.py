@@ -1,75 +1,129 @@
 import datetime
 import json
+import logging
 import os
+from collections.abc import Awaitable, Callable
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from jose import jwe
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from jose import jwe, jwt
 
-app = FastAPI()
+from ahorratron.sync_api.connectors import get_connector
+from ahorratron.sync_api.models.account_models import Account, AccountsResponse
+from ahorratron.sync_api.models.core_models import SessionData, UserData
+from ahorratron.sync_api.models.transaction_models import TransactionsResponse
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 SECRET_KEY = bytes.fromhex(os.environ["JWE_SECRET_KEY"])  # Must be 32 bytes for A256GCM
 TOKEN_DURATION = datetime.timedelta(hours=12)
 JWE_ALGORITHM = "A256GCM"
 
+JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]
+JWT_ALGORITHM = "HS256"  # Or RS256 if you want asymmetric signing
+
+app = FastAPI()
+
+
+@app.middleware("http")
+async def log_request_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    body: bytes = await request.body()
+    logger.info(
+        "Incoming request: %s %s | Headers: %s | Body: %s",
+        request.method,
+        request.url.path,
+        dict(request.headers),
+        body.decode("utf-8") if body else None,
+    )
+    response: Response = await call_next(request)
+    return response
+
 
 # Generate encrypted JWT (JWE) from a dictionary
-def create_encrypted_token(data: dict) -> bytes:
-    if not isinstance(data, dict):
-        raise ValueError("Input data must be a dictionary.")
-    username = data.get("username")
-    password = data.get("password")
-    if not username or not password:
-        raise ValueError(
-            "Both 'username' and 'password' are required in the token data."
-        )
-    payload = data.copy()
-    payload["sub"] = username
-    payload["exp"] = int(
-        (datetime.datetime.now(datetime.UTC) + TOKEN_DURATION).timestamp()
+def create_encrypted_token(data: SessionData) -> str:
+    enc_payload = data.model_dump()
+    enc_token = jwe.encrypt(
+        json.dumps(enc_payload), SECRET_KEY, algorithm=JWE_ALGORITHM
     )
-    encrypted_token = jwe.encrypt(
-        json.dumps(payload), SECRET_KEY, algorithm=JWE_ALGORITHM
-    )
-    return encrypted_token
+    enc_token_str = enc_token.decode() if isinstance(enc_token, bytes) else enc_token
+
+    payload = {
+        "enc_token": enc_token_str,
+        "exp": int((datetime.datetime.now(datetime.UTC) + TOKEN_DURATION).timestamp()),
+    }
+    token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return token
 
 
 # Dependency to get current user and password from encrypted token
-def get_decrypted_token(x_api_key: str = Header(..., alias="X-API-KEY")):
+def get_decrypted_token(x_api_key: str = Header(..., alias="X-API-KEY")) -> SessionData:
     try:
-        decrypted = jwe.decrypt(x_api_key, SECRET_KEY)
-        if decrypted is None:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        payload = json.loads(decrypted.decode())
+        # Decode JWT
+        payload = jwt.decode(x_api_key, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         exp = payload.get("exp")
         if exp and datetime.datetime.now(datetime.UTC).timestamp() > exp:
             raise HTTPException(status_code=401, detail="Token expired")
-        username = payload.get("username")
-        password = payload.get("password")
-        if not username or not password:
-            raise HTTPException(
-                status_code=401, detail="Invalid token: missing username or password"
-            )
-        return payload
+        enc_token = payload.get("enc_token")
+        if not enc_token:
+            raise HTTPException(status_code=401, detail="Missing encrypted token")
+        # Decrypt the encrypted token
+        decrypted = jwe.decrypt(enc_token, SECRET_KEY)
+        if decrypted is None:
+            raise HTTPException(status_code=401, detail="Invalid encrypted token")
+        session_data = SessionData.model_validate_json(decrypted.decode())
+        return session_data
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 
 @app.post("/auth")
-async def auth(request: Request):
-    data = await request.json()
+async def auth(request: UserData):
+    data = SessionData(user_data=request)
     try:
         token = create_encrypted_token(data)
+        logger.debug(f"Generated token: {token}")
         return {"apiKey": token}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/accounts", response_model=AccountsResponse)
+def get_accounts(itemId: str, session_data: SessionData = Depends(get_decrypted_token)):
+    logger.debug(f"Session data: {session_data}")
+    connector = get_connector(session_data.user_data)
+    response = connector.get_accounts(itemId=itemId)
+    logger.debug(f"Accounts response: {response}")
+    return response
+
+
+@app.get("/accounts/{accountId}", response_model=Account)
+def get_account_by_id(
+    accountId: str, session_data: SessionData = Depends(get_decrypted_token)
+):
+    connector = get_connector(session_data.user_data)
+    response = connector.get_account_by_id(accountId=accountId)
+    logger.debug(f"Account detail response: {response}")
+    return response
+
+
+@app.get("/transactions", response_model=TransactionsResponse)
+def get_transactions(
+    accountId: str, session_data: SessionData = Depends(get_decrypted_token)
+):
+    connector = get_connector(session_data.user_data)
+    response = connector.get_transactions(accountId=accountId)
+    logger.info(f"Transactions response: {response}")
+    return response
+
+
 @app.get("/protected")
-def protected_route(data: dict = Depends(get_decrypted_token)):
+def protected_route(user_data: dict = Depends(get_decrypted_token)):
     return {
-        "message": f"Hello, {data['username']}. Your password is securely encrypted in the token.",
-        "data": data,
+        "message": f"Hello, {user_data['username']}. Your password is securely encrypted in the token.",
+        "data": user_data,
     }
 
 

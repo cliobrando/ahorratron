@@ -4,8 +4,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from ahorratron.sync_api.banco_de_chile import APIClient
-from ahorratron.sync_api.models import (
+from ahorratron.sync_api.institutions.banco_de_chile.banco_de_chile import APIClient
+from ahorratron.sync_api.institutions.banco_de_chile.models import (
     GetCartolaCuentaRequest,
     GetCartolaResponse,
     MovimientosNoFacturadosRequest,
