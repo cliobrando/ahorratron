@@ -16,17 +16,13 @@ services:
       # See all options and more details at https://actualbudget.github.io/docs/Installing/Configuration
       # !! If you are not using any of these options, remove the 'environment:' tag entirely.
     volumes:
-      # Change './actual-data' below to the path to the folder you want Actual to store its data in on your server.
       # '/data' is the path Actual will look for its files in by default, so leave that as-is.
-      - ./actual-data:/data
-      - ./certs:/certs
+      - actual_data:/data
+      - certs_data:/certs
     environment:
       NODE_EXTRA_CA_CERTS: /certs/cert.pem
-    extra_hosts:
-      - "api.pluggy.ai:172.28.0.3"
     networks:
-      custom_net:
-        ipv4_address: 172.28.0.2
+      ahorratron_net:
     depends_on:
       - ahorratron-sync-api
     healthcheck:
@@ -39,13 +35,13 @@ services:
     restart: unless-stopped
 
   ahorratron-sync-api:
-    image: ahorratron:latest
+    image: ghcr.io/diegocaro/ahorratron:latest
     ports:
-      - '9443:443'
+      - '8443:443' 
     env_file:
       - .env
     volumes:
-      - ./certs:/certs
+      - certs_data:/certs
     command: |
       sh -c '
         if [ ! -f /certs/cert.pem ]; then
@@ -58,8 +54,11 @@ services:
         uv run uvicorn ahorratron.sync_api.main:app --host 0.0.0.0 --port 443 --ssl-keyfile /certs/key.pem --ssl-certfile /certs/cert.pem
       '
     networks:
-      custom_net:
-        ipv4_address: 172.28.0.3
+      ahorratron_net:
+        aliases:
+        # this is the magic sauce that allows the API to be accessed via from Actual Budget
+        # We are impersonating api.pluggy.ai :)
+          - api.pluggy.ai
 
   selenium:
     image: selenium/standalone-chromium:latest
@@ -72,14 +71,12 @@ services:
       # - SE_START_XVFB=true   # Ensures graphical mode (not headless)
       # - SE_VNC_PASSWORD=secret  # Default VNC password
     networks:
-      custom_net:
-        ipv4_address: 172.28.0.4
+      ahorratron_net:
 
 networks:
-  custom_net:
+  ahorratron_net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
 
-
+volumes:
+  actual_data:
+  certs_data:
