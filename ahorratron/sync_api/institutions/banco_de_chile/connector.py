@@ -2,19 +2,27 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from cachetools import TTLCache, cachedmethod
+from cachetools import TTLCache
 
+import ahorratron.sync_api.utils.constants as c
 from ahorratron.sync_api.core.connector import ConnectorBase
 from ahorratron.sync_api.institutions.banco_de_chile.models import (
     GetCartolaCuentaRequest,
     GetCartolaResponse,
     GetSaldoResponse,
+    GrupoTipo,
     Movimiento,
     MovimientoNoFacturado,
     MovimientosNoFacturadosRequest,
+    MovimientoTipo,
     NoFacturadosResponse,
     ObtenerProductosResponse,
+    OrigenTransaccionTipo,
     Producto,
+    ProductoTipo,
+    ResumenNacionalResponse,
+    ResumenPorFechaRequest,
+    TransaccionTarjeta,
 )
 from ahorratron.sync_api.models.account_models import (
     Account,
@@ -50,6 +58,8 @@ class BancoDeChileConnector(ConnectorBase):
     DATE_FORMAT_HORA_CONSULTA = "%d/%m/%Y %H:%M"
 
     DATE_FORMAT_NO_FACTURADO = "%d/%m/%Y %H:%M:%S"
+
+    DATE_REPLACE_STRING = " Hrs."
 
     def __init__(self, client: APIClient):
         self._client = client
@@ -160,6 +170,33 @@ class BancoDeChileConnector(ConnectorBase):
         saldo = self._client.get_saldo(request)
         return saldo
 
+    def _get_facturados_raw(self, tarjeta: Producto) -> ResumenNacionalResponse:
+        data_fechas = {
+            "idTarjeta": tarjeta.id,
+            "codigoProducto": tarjeta.codigo,
+            "tipoTarjeta": tarjeta.descripcionLogo,
+            "mascara": tarjeta.mascara,
+            "nombreTitular": tarjeta.tarjetaHabiente,
+            "tipoCliente": tarjeta.tipoCliente,
+        }
+        request = MovimientosNoFacturadosRequest.model_validate(data_fechas)
+        fechas_facturacion = self._client.get_fechas_facturacion(request)
+        mes_mas_reciente = max(
+            e.fechaFacturacion for e in fechas_facturacion.listaNacional
+        ).isoformat()
+        data = {
+            "idTarjeta": tarjeta.id,
+            "codigoProducto": tarjeta.codigo,
+            "tipoTarjeta": tarjeta.descripcionLogo,
+            "mascara": tarjeta.mascara,
+            "nombreTitular": tarjeta.tarjetaHabiente,
+            # "tipoCliente": tarjeta.tipoCliente,
+            "fechaFacturacion": mes_mas_reciente,
+            "numeroCuenta": fechas_facturacion.numeroCuenta,
+        }
+        request = ResumenPorFechaRequest.model_validate(data)
+        return self._client.get_resumen_nacional(request)
+
     def _get_transactions_cartola(self, cuenta: Producto) -> list[Transaction]:
         cartola = self._get_cartola_raw(cuenta)
         transactions = [
@@ -176,16 +213,16 @@ class BancoDeChileConnector(ConnectorBase):
         dt_local = dt.replace(tzinfo=ZoneInfo(self.DEFAULT_TIMEZONE))
 
         # can be "cargo" or "abono"
-        if movimiento.tipo == "cargo":
+        if movimiento.tipo == MovimientoTipo.CARGO:
             transaction_type = TransactionType.DEBIT
-        elif movimiento.tipo == "abono":
+        elif movimiento.tipo == MovimientoTipo.ABONO:
             transaction_type = TransactionType.CREDIT
         else:
             logger.error(f"Unknown transaction type: {movimiento.tipo}")
             return None
 
         monto = abs(float(movimiento.monto))
-        if movimiento.tipo == "cargo":
+        if movimiento.tipo == MovimientoTipo.CARGO:
             monto = -monto
 
         if movimiento.estado is None:
@@ -218,9 +255,9 @@ class BancoDeChileConnector(ConnectorBase):
         )
 
     def _map_account_producto(self, itemId: str, producto: Producto) -> Account | None:
-        if producto.tipo == "cuenta":
+        if producto.tipo == ProductoTipo.CUENTA:
             return self._map_account_producto_cuenta(itemId, producto)
-        elif producto.tipo == "tarjeta":
+        elif producto.tipo == ProductoTipo.TARJETA:
             return self._map_account_producto_tarjeta_credito(itemId, producto)
         else:
             logger.warning(
@@ -237,7 +274,8 @@ class BancoDeChileConnector(ConnectorBase):
             automaticallyInvestedBalance=0,
         )
         updated_at = datetime.strptime(
-            cartola.horaConsulta.replace(" Hrs.", ""), self.DATE_FORMAT_HORA_CONSULTA
+            cartola.horaConsulta.replace(self.DATE_REPLACE_STRING, ""),
+            self.DATE_FORMAT_HORA_CONSULTA,
         )
         updated_at_local = updated_at.replace(tzinfo=ZoneInfo(self.DEFAULT_TIMEZONE))
         # dt_utc_iso = dt_local.astimezone(ZoneInfo("UTC")).isoformat()
@@ -281,13 +319,21 @@ class BancoDeChileConnector(ConnectorBase):
             self._map_transaction_no_facturado(movimiento, tarjeta)
             for movimiento in no_facturados.listaMovNoFactur
         ]
+
+        facturados = self._get_facturados_raw(tarjeta)
+        transactions += [
+            self._map_transaction_facturado(facturados, movimiento)
+            for movimiento in facturados.seccionOperaciones.transaccionesTarjetas
+            + facturados.seccionCargosImpuestosAbonos.transaccionesTarjetas
+        ]
         transactions = [t for t in transactions if t is not None]
+
         return transactions
 
     def _map_transaction_no_facturado(
         self, movimiento: MovimientoNoFacturado, tarjeta: Producto
     ) -> Transaction | None:
-        if movimiento.origenTransaccion.upper() == "INT":
+        if movimiento.origenTransaccion != OrigenTransaccionTipo.NAC:
             # Skipping international transactions for now
             # Y manejar bien las divisas! Estamos hardcodeando CLP
             return None
@@ -312,7 +358,49 @@ class BancoDeChileConnector(ConnectorBase):
             description=movimiento.glosaTransaccion,
             accountId=movimiento.numeroTarjeta,
             type=transaction_type,
-            currencyCode="CLP" if movimiento.origenTransaccion == "NAC" else "USD",
+            currencyCode=c.CLP,
             status=TransactionStatus.PENDING,
             merchant=Merchant(name=movimiento.glosaTransaccion),
+        )
+
+    def _map_transaction_facturado(
+        self,
+        facturado: ResumenNacionalResponse,
+        movimiento: TransaccionTarjeta,
+        currency_code: str = c.CLP,
+    ) -> Transaction | None:
+        if movimiento.totales or not movimiento.idMovimiento:
+            logger.warning(
+                f"Skipping totals or invalid transaction {movimiento.descripcion} {movimiento.montoTransaccion}"
+            )
+            return None
+        if not movimiento.fechaTransaccion:
+            logger.error(f"Transaction has no date")
+            return None
+
+        dt = datetime.fromtimestamp(
+            movimiento.fechaTransaccion / 1000, ZoneInfo(self.DEFAULT_TIMEZONE)
+        )
+
+        if movimiento.grupo in [GrupoTipo.AVANCES_COMPRAS, GrupoTipo.GENERICO]:
+            transaction_type = TransactionType.DEBIT
+            monto = movimiento.montoTransaccion
+        elif movimiento.grupo == GrupoTipo.PAGOS:
+            transaction_type = TransactionType.CREDIT
+            monto = -abs(movimiento.montoTransaccion)
+        else:
+            logger.error(f"Unknown transaction type: {movimiento.grupo}")
+            return None
+
+        return Transaction(
+            id=movimiento.idMovimiento,
+            date=dt.isoformat(),
+            amount=monto,
+            # balance=balance,
+            description=movimiento.descripcion,
+            accountId=movimiento.nombreTarjeta,
+            type=transaction_type,
+            currencyCode=currency_code,
+            status=TransactionStatus.POSTED,
+            merchant=Merchant(name=movimiento.descripcion),
         )

@@ -1,3 +1,6 @@
+from datetime import date
+from enum import Enum
+
 from pydantic import BaseModel
 
 
@@ -32,7 +35,27 @@ class GetCartolaCuentaRequest(BaseModel):
     cabecera: Cabecera
 
 
+class ResumenPorFechaRequest(BaseModel):
+    idTarjeta: str
+    codigoProducto: str
+    tipoTarjeta: str
+    mascara: str
+    nombreTitular: str
+    fechaFacturacion: str
+    numeroCuenta: str
+
+
 #### RESPONSES MODELS ####
+class ProductoTipo(str, Enum):
+    CUENTA = "cuenta"
+    CUENTA_CORRIENTE_MONEDA_LOCAL = "cuentaCorrienteMonedaLocal"
+    AHORRO = "ahorro"
+    LINEA = "linea"
+    TARJETA = "tarjeta"
+    SEGURO = "seguro"
+    PAGO_AUTOMATICO = "pagoAutomatico"
+
+
 class Producto(BaseModel):
     id: str
     numero: str
@@ -41,7 +64,7 @@ class Producto(BaseModel):
     codigoMoneda: str
     alias: str | None
     label: str
-    tipo: str
+    tipo: ProductoTipo
     claseCuenta: str
     subProducto: str | None
     estado: str
@@ -57,8 +80,13 @@ class ObtenerProductosResponse(BaseModel):
     productos: list[Producto]
 
 
+class OrigenTransaccionTipo(str, Enum):
+    NAC = "NAC"
+    INT = "INT"
+
+
 class MovimientoNoFacturado(BaseModel):
-    origenTransaccion: str
+    origenTransaccion: OrigenTransaccionTipo
     fechaTransaccion: int
     fechaTransaccionString: str
     montoCompra: float
@@ -95,6 +123,11 @@ class NoFacturadosResponse(BaseModel):
     listaMovNoFactur: list[MovimientoNoFacturado]
 
 
+class MovimientoTipo(str, Enum):
+    CARGO = "cargo"
+    ABONO = "abono"
+
+
 class Movimiento(BaseModel):
     estado: str | None
     descripcion: str
@@ -104,7 +137,7 @@ class Movimiento(BaseModel):
     numeroCuenta: str
     idCuenta: str
     canal: str
-    tipo: str
+    tipo: MovimientoTipo
     fecha: str
     fechaContable: str
     id: str
@@ -148,3 +181,98 @@ class GetSaldoResponse(BaseModel):
     existeEECC: bool
     pagarHasta: str
     facturadoAl: str
+
+
+class GrupoTipo(str, Enum):
+    PAGOS = "pagos"
+    AVANCES_COMPRAS = "avancesCompras"
+    GENERICO = "generico"
+
+
+class TransaccionTarjeta(BaseModel):
+    numReferencia: str
+    nombreTarjeta: str
+    fechaTransaccion: int | None
+    fechaTransaccionString: str | None
+    montoTransaccion: float
+    descripcion: str
+    ciudad: str
+    cuotas: str
+    nombreTitular: str
+    # comercio: Any
+    # rubro: Any
+    totales: bool
+    grupo: GrupoTipo
+    tituloTotales: str | None
+    cambioTarjeta: bool
+    aclaracion: dict
+    idMovimiento: str | None
+    # estado: Any
+    # comprobanteSiebel: Any
+    # fechaComprobanteSiebel: Any
+    idComprobante: str
+
+
+class Resumen(BaseModel):
+    cupo: float
+    cupoUtilizado: float
+    cupoDisponible: float
+    montoFacturado: float
+    pagoMinimo: float
+    fechaFacturacionActual: str
+    fechaVencimientoFacturacion: str
+    fechaProximaFacturacion: str
+    totalPagos: float
+    totalCargosAutomaticos: float
+    totalComprasCuotasAvances: float
+    totalCargosAbonosCta: float
+    tasaProxPerCredRot: float | None
+    # traspasoMonedaNac: Any
+    saldoAnteriorFacturado: float
+
+
+class ProximosPeriodos(BaseModel):
+    saldoCapitalCuotas: float
+    vencimientoCuotas1: float
+    vencimientoCuotas2: float
+    vencimientoCuotas3: float
+    vencimientoCuotas4: float
+    mesVencimientoCuotas1: str
+    mesVencimientoCuotas2: str
+    mesVencimientoCuotas3: str
+    mesVencimientoCuotas4: str
+    tasaInteresCreditoRotativo: str
+    tasaInteresCreditoCuotas: str
+
+
+class SeccionOperaciones(BaseModel):
+    totalTransacciones: float
+    numeroDeTransacciones: int
+    mensajeSinTransacciones: str | None
+    fechaDesde: str
+    fechaHasta: str
+    transaccionesTarjetas: list[TransaccionTarjeta]
+
+
+class ResumenNacionalResponse(BaseModel):
+    existeEstadoCuenta: bool
+    resumen: Resumen
+    proximosPeriodos: ProximosPeriodos
+    seccionOperaciones: SeccionOperaciones
+    seccionProductosServiciosVoluntarios: dict | None
+    seccionCargosImpuestosAbonos: SeccionOperaciones
+    seccionComprasEnCuotas: dict | None
+
+
+class ItemFechaFacturacion(BaseModel):
+    fechaFacturacion: date  # es un string con formato %Y-%m-%d
+    existeEstadoCuentaNacional: str
+    existeEstadoCuentaInternacional: str
+
+
+class FechasFacturacionResponse(BaseModel):
+    mensaje: str
+    existenEstadosDeCuenta: bool
+    listaNacional: list[ItemFechaFacturacion]
+    numeroCuenta: str
+    listaInternacional: list[ItemFechaFacturacion]
