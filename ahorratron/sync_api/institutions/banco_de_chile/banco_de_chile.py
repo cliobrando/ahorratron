@@ -3,7 +3,7 @@ import os
 import platform
 import random
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import selenium.common.exceptions as selenium_exceptions
@@ -14,6 +14,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from ahorratron.sync_api.institutions.banco_de_chile.models import (
+    CuentaAhorroRequest,
+    CuentaAhorroResponse,
     FechasFacturacionResponse,
     GetCartolaCuentaRequest,
     GetCartolaResponse,
@@ -57,7 +59,7 @@ class APIClient:
 
     """
 
-    SESSION_COOKIE_NAMES = ["mod_auth_openidc_session"]
+    SESSION_COOKIE_NAMES: ClassVar[list[str]] = ["mod_auth_openidc_session"]
     BASE_URL = BANK_API_BASE_URL
     LOGIN_URL = BANK_LOGIN_URL
 
@@ -237,6 +239,12 @@ class APIClient:
         response = self.session.post(url, json=data.model_dump())
         parsed = self._handle_response(response)
         return ResumenNacionalResponse.model_validate(parsed)
+
+    def get_cuenta_ahorro(self, data: CuentaAhorroRequest) -> CuentaAhorroResponse:
+        url = f"{self.BASE_URL}/movimientos/getMovimientosCuentaAhorro"
+        response = self.session.post(url, json=data.model_dump())
+        parsed = self._handle_response(response)
+        return CuentaAhorroResponse.model_validate(parsed)
 
 
 def main():
