@@ -13,9 +13,6 @@ WORKDIR /app
 # Install the application dependencies.
 RUN uv sync --frozen --no-cache
 
-# Pre-build the ahorratron package so runtime doesn't need PyPI
-RUN uv pip install -e . --no-deps
-
 # Expose port
 EXPOSE 8000
 
