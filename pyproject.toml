@@ -17,6 +17,7 @@ dependencies = [
     "python-jose>=3.5.0",
     "cachetools>=6.1.0",
     "pycryptodome>=3.23.0",
+    "tenacity>=9.0.0",
 ]
 
 [project.scripts]

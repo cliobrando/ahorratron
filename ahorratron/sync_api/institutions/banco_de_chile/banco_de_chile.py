@@ -3,15 +3,24 @@ import os
 import platform
 import random
 import time
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 import httpx
 import selenium.common.exceptions as selenium_exceptions
 from selenium import webdriver
+from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_fixed,
+    wait_exponential,
+)
 
 from ahorratron.sync_api.institutions.banco_de_chile.models import (
     CuentaAhorroRequest,
@@ -35,18 +44,50 @@ HEADER_ORIGIN = os.environ["HEADER_ORIGIN"]
 
 logger = logging.getLogger(__name__)
 
-type CookieDict = dict[str, str]
+type CookieDict = dict[str, Any]
 
-
-def random_wait(min_seconds: float = 1, max_seconds: float = 3) -> None:
-    time.sleep(random.uniform(min_seconds, max_seconds))
-
-
-class LoginError(Exception):
-    """Custom exception for login errors. You should not retry if this is raised."""
-
+class SessionExpiredError(Exception):
+    """Raised when the bank returns a 302, indicating the session has expired."""
     pass
 
+class BankServerError(Exception):
+    """Bank returned 5xx, safe to retry."""
+    pass
+
+class BankNetworkError(Exception):
+    """Network failure reaching the bank, safe to retry."""
+    pass
+    
+class LoginError(Exception):
+    """Raised when bank login fails."""
+    pass
+    
+# Retry configuration    
+# Only retries on SessionExpiredError
+# one try, one retry if not loged,
+bank_session_retry = retry(
+    retry=retry_if_exception_type(SessionExpiredError),
+    stop=stop_after_attempt(2),
+    wait=wait_fixed(1),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
+
+# Retries other errors (500, timpout, protocol, etc) max 30 sec
+bank_other_retry = retry(
+    retry=(
+        retry_if_exception_type(BankServerError)
+        | retry_if_exception_type(BankNetworkError)
+    ),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=5, max=30),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
+
+# Random wait used between INPUT_RUT and INPUT_PASSWORD when loging in using the browser, so the systems dont see us as a bot.
+def random_wait(min_seconds: float = 1, max_seconds: float = 3) -> None:
+    time.sleep(random.uniform(min_seconds, max_seconds))
 
 class APIClient:
     """
@@ -71,8 +112,7 @@ class APIClient:
     def __init__(self, username: str, password: str):
         self._username = username
         self._password = password
-
-        self._session = None
+        self._session: httpx.Client | None = None
 
     def _parse_session_cookies(self, cookies: list[CookieDict]) -> str:
         session_cookie = {
@@ -87,29 +127,41 @@ class APIClient:
         pairs = [f"{name}={value};" for name, value in session_cookie.items()]
         return " ".join(pairs)
 
+
+    def _build_session(self) -> httpx.Client:
+        """Login via Selenium and return a configured httpx.Client with session cookies."""
+        logger.info("Logging in to Banco de Chile to get session cookies")
+        cookie_raw = self._login_and_cookies()
+        cookie = self._parse_session_cookies(cookie_raw)
+
+        return httpx.Client(
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br, zstd",
+                "Referer": HEADER_REFERER,
+                "Content-Type": "application/json",
+                "Origin": HEADER_ORIGIN,
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Cookie": cookie,
+            }
+        )
+
+
     @property
     def session(self) -> httpx.Client:
         if self._session is None:
-            logger.info("Logging in to Banco de Chile to get session cookies")
-            cookie_raw = self._login_and_cookies()
-            cookie = self._parse_session_cookies(cookie_raw)
-
-            s = httpx.Client(
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0",
-                    "Accept": "application/json, text/plain, */*",
-                    "Accept-Language": "en-US,en;q=0.5",
-                    "Accept-Encoding": "gzip, deflate, br, zstd",
-                    "Referer": HEADER_REFERER,
-                    "Content-Type": "application/json",
-                    "Origin": HEADER_ORIGIN,
-                    "DNT": "1",
-                    "Connection": "keep-alive",
-                    "Cookie": cookie,
-                }
-            )
-            self._session = s
+            self._session = self._build_session()
         return self._session
+
+    def invalidate_session(self) -> None:
+        """Force a fresh login on the next request."""
+        logger.info("Invalidating session re-login on next request")
+        if self._session:
+            self._session.close()
+        self._session = None
 
     def _handle_response(self, response: httpx.Response) -> Any:
         try:
@@ -117,11 +169,31 @@ class APIClient:
             return response.json()
         except httpx.HTTPStatusError as e:
             if response.status_code == 302:
-                self._session = None
-                logger.info("Session expired, re-logging in")
-                raise ValueError("Session expired, please re-login") from e
+                self.invalidate_session()
+                raise SessionExpiredError(
+                    f"Session expired (302 → {response.headers.get('location', '?')})"
+                ) from e
+            if response.status_code >= 500:
+                raise BankServerError(
+                    f"Bank server error {response.status_code}"
+                ) from e
             logger.error(f"HTTP error occurred: {e}")
             raise
+        except httpx.JSONDecodeError as e:
+            raise BankServerError(
+                "Invalid JSON response"
+            ) from e
+
+    def _request(self, fn: Callable, *args: Any, **kwargs: Any) -> Any:
+        """
+        Execute a request callable, handling session expiry.
+        self.session will trigger a fresh Selenium login automatically.
+        """
+        try:
+            response = fn(*args, **kwargs)
+            return self._handle_response(response)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+            raise BankNetworkError(f"Network error reaching bank: {e}") from e
 
     def _login_and_cookies(self) -> list[CookieDict]:
         """
@@ -147,15 +219,17 @@ class APIClient:
                 driver, self.LOGIN_URL, self._username, self._password
             )
             logger.debug(f"Cookies from Selenium: {cookies}")
+        except LoginError:
+            raise
         except Exception as e:
             raise ValueError(f"Login failed: {e}") from e
         finally:
             driver.quit()
         return cookies
-
+        
     def _login_via_browser(
         self,
-        driver: webdriver.Chrome | webdriver.Remote,
+        driver: WebDriver,
         bank_url: str,
         username: str,
         password: str,
@@ -195,55 +269,55 @@ class APIClient:
         # Return session cookies
         return cookies
 
+    # Each method is decorated with @bank_session_retry
+    
+    @bank_other_retry
+    @bank_session_retry
     def get_productos(self, incluirTarjetas: bool = True) -> ObtenerProductosResponse:
         url = f"{self.BASE_URL}/selectorproductos/selectorProductos/obtenerProductos"
-        params = {"incluirTarjetas": incluirTarjetas}
-        response = self.session.get(url, params=params)
-        parsed = self._handle_response(response)
+        parsed = self._request(self.session.get, url, params={"incluirTarjetas": incluirTarjetas})
         return ObtenerProductosResponse.model_validate(parsed)
 
-    def get_no_facturados(
-        self, data: MovimientosNoFacturadosRequest
-    ) -> NoFacturadosResponse:
+    @bank_other_retry
+    @bank_session_retry
+    def get_no_facturados(self, data: MovimientosNoFacturadosRequest) -> NoFacturadosResponse:
         url = f"{self.BASE_URL}/tarjeta-credito-digital/movimientos-no-facturados"
-
-        response = self.session.post(url, json=data.model_dump())
-        parsed = self._handle_response(response)
+        parsed = self._request(self.session.post, url, json=data.model_dump())
         return NoFacturadosResponse.model_validate(parsed)
 
+    @bank_other_retry
+    @bank_session_retry
     def get_cartola(self, data: GetCartolaCuentaRequest) -> GetCartolaResponse:
         url = f"{self.BASE_URL}/bff-pper-prd-cta-movimientos/movimientos/getCartola"
-
-        response = self.session.post(url, json=data.model_dump())
-        parsed = self._handle_response(response)
+        parsed = self._request(self.session.post, url, json=data.model_dump())
         return GetCartolaResponse.model_validate(parsed)
 
+    @bank_other_retry
+    @bank_session_retry
     def get_saldo(self, data: MovimientosNoFacturadosRequest) -> GetSaldoResponse:
         url = f"{self.BASE_URL}/tarjeta-credito-digital/saldo/obtener-saldo"
-        response = self.session.post(url, json=data.model_dump())
-        parsed = self._handle_response(response)
+        parsed = self._request(self.session.post, url, json=data.model_dump())
         return GetSaldoResponse.model_validate(parsed)
 
-    def get_fechas_facturacion(
-        self, data: MovimientosNoFacturadosRequest
-    ) -> FechasFacturacionResponse:
+    @bank_other_retry
+    @bank_session_retry
+    def get_fechas_facturacion(self, data: MovimientosNoFacturadosRequest) -> FechasFacturacionResponse:
         url = f"{self.BASE_URL}/tarjetas/estadocuenta/fechas-facturacion"
-        response = self.session.post(url, json=data.model_dump())
-        parsed = self._handle_response(response)
+        parsed = self._request(self.session.post, url, json=data.model_dump())
         return FechasFacturacionResponse.model_validate(parsed)
 
-    def get_resumen_nacional(
-        self, data: ResumenPorFechaRequest
-    ) -> ResumenNacionalResponse:
+    @bank_other_retry
+    @bank_session_retry
+    def get_resumen_nacional(self, data: ResumenPorFechaRequest) -> ResumenNacionalResponse:
         url = f"{self.BASE_URL}/tarjetas/estadocuenta/nacional/resumen-por-fecha"
-        response = self.session.post(url, json=data.model_dump())
-        parsed = self._handle_response(response)
+        parsed = self._request(self.session.post, url, json=data.model_dump())
         return ResumenNacionalResponse.model_validate(parsed)
-
+    
+    @bank_other_retry
+    @bank_session_retry
     def get_cuenta_ahorro(self, data: CuentaAhorroRequest) -> CuentaAhorroResponse:
         url = f"{self.BASE_URL}/movimientos/getMovimientosCuentaAhorro"
-        response = self.session.post(url, json=data.model_dump())
-        parsed = self._handle_response(response)
+        parsed = self._request(self.session.post, url, json=data.model_dump())
         return CuentaAhorroResponse.model_validate(parsed)
 
 
