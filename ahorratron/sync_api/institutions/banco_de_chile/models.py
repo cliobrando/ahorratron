@@ -160,7 +160,7 @@ class MovimientoTipo(StrEnum):
 
 
 class Movimiento(BaseModel):
-    estado: str | None
+    estado: str | None = None
     descripcion: str
     monto: str
     saldo: str
